@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>위로드 북마크 설치</title>
+<style>
+  body{font-family:'Noto Sans KR','Malgun Gothic',sans-serif;background:#f4f6fa;color:#0f172a;margin:0;padding:32px 16px}
+  main{max-width:760px;margin:0 auto;background:#fff;border:1px solid #e3e8f0;border-radius:12px;padding:28px}
+  h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:26px 0 8px}
+  p,li{color:#475569;line-height:1.7}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  input{border:1px solid #cfd8e6;border-radius:6px;padding:7px 10px;font-size:13px;width:200px}
+  .bm{display:inline-block;color:#fff;text-decoration:none;font-weight:700;padding:11px 20px;border-radius:24px;cursor:grab}
+  .stable{background:#0f1b33}.dev{background:#b45309}
+  .card{border:1px solid #e3e8f0;border-radius:10px;padding:14px 16px;margin-top:10px}
+  .card.devc{border-color:#fcd34d;background:#fffbeb}
+  button{background:#fff;border:1px solid #cfd8e6;border-radius:6px;padding:6px 12px;cursor:pointer}
+  code{background:#f1f5f9;padding:1px 6px;border-radius:4px}
+  .ok{color:#0b7a3b;font-size:12px}
+</style>
+</head>
+<body>
+<main>
+  <h1>위로드 (WeRoad) · 북마크 설치</h1>
+  <p>북마크는 한 번만 설치하면 됩니다. 누를 때마다 GitHub에 올라간 코드를 불러오므로, 새 버전이 나와도 다시 설치할 필요가 없습니다.</p>
+
+  <h2>1. 저장소 확인</h2>
+  <div class="row">
+    <label>GitHub 계정 <input id="owner" placeholder="예: wefun-logis"></label>
+    <label>저장소 <input id="repo" value="weroad"></label>
+  </div>
+
+  <h2>2. 북마크바로 끌어다 놓기</h2>
+  <div class="card">
+    <b>일반 사용자용</b> — 정식 배포(stable) 버전만 열립니다.<br>
+    <a id="bm-stable" class="bm stable" href="#">위로드</a>
+    <button data-copy="bm-stable">코드 복사</button><span class="ok" id="m-bm-stable"></span>
+  </div>
+  <div class="card devc">
+    <b>개발자용</b> — 아직 배포 전인 최신 개발(main) 버전이 열립니다. 패널에 <code>DEV</code> 표시가 붙습니다. <b>개발자 본인만 설치하세요.</b><br>
+    <a id="bm-dev" class="bm dev" href="#">위로드 DEV</a>
+    <button data-copy="bm-dev">코드 복사</button><span class="ok" id="m-bm-dev"></span>
+  </div>
+  <p>끌어다 놓기가 안 되면: <b>코드 복사</b> → 북마크바 우클릭 → <b>페이지 추가</b> → URL에 붙여넣기.</p>
+
+  <h2>사용법</h2>
+  <ol>
+    <li>위펀오피스(office.wefun.kr)에 로그인된 화면에서 북마크를 누르면 패널이 열립니다.</li>
+    <li>화면을 이동하거나 새로고침하면 닫히므로 다시 누르세요.</li>
+    <li>소속 설정과 수집 데이터는 각자의 브라우저에 저장됩니다. 소속은 기사마스터 탭의 내보내기·붙여넣기로 공유하세요.</li>
+  </ol>
+</main>
+<script>
+  const loader = (owner, repo, channel) => {
+    const code = `(function(){if(location.hostname!=='office.wefun.kr'){alert('위펀오피스(office.wefun.kr) 화면에서 눌러주세요');return}`
+      + `var O=${JSON.stringify(owner)},R=${JSON.stringify(repo)},C=${JSON.stringify(channel)};`
+      + `function open(){var h=document.getElementById('wf-dcal-host');if(h)h.shadowRoot.querySelector('.launch').click()}`
+      + `function run(t){window.__WEROAD_CHANNEL__=C;var s=document.createElement('script');s.textContent=t;document.documentElement.appendChild(s);s.remove();open()}`
+      + `if(window.__WF_DCAL__){open();return}`
+      + `var raw='https://raw.githubusercontent.com/'+O+'/'+R+'/main/';`
+      + `var p=C==='dev'?fetch(raw+'src/weroad.js?t='+Date.now(),{cache:'no-store'}):fetch(raw+'release.json?t='+Date.now(),{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('release.json '+r.status);return r.json()}).then(function(j){return fetch('https://cdn.jsdelivr.net/gh/'+O+'/'+R+'@'+j.stable+'/src/weroad.js')});`
+      + `p.then(function(r){if(!r.ok)throw new Error('코드 '+r.status);return r.text()}).then(run).catch(function(e){alert('위로드를 불러오지 못했습니다: '+e.message)})})()`;
+    return 'javascript:' + encodeURIComponent(code);
+  };
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  if (params.get('owner')) $('owner').value = params.get('owner');
+  if (params.get('repo')) $('repo').value = params.get('repo');
+  const update = () => {
+    const o = $('owner').value.trim(), r = $('repo').value.trim() || 'weroad';
+    for (const [id, ch] of [['bm-stable', 'stable'], ['bm-dev', 'dev']]) $(id).href = o ? loader(o, r, ch) : '#';
+  };
+  $('owner').oninput = $('repo').oninput = update;
+  update();
+  for (const a of document.querySelectorAll('.bm')) a.addEventListener('click', (e) => { e.preventDefault(); alert($('owner').value.trim() ? '이 버튼은 북마크바로 끌어다 놓아 주세요.' : '먼저 GitHub 계정을 입력하세요.'); });
+  for (const b of document.querySelectorAll('[data-copy]')) b.onclick = async () => {
+    const id = b.dataset.copy, v = $(id).href;
+    if (v === '#' || v.endsWith('#')) return alert('먼저 GitHub 계정을 입력하세요.');
+    try { await navigator.clipboard.writeText(v); } catch (e) { const t = document.createElement('textarea'); t.value = v; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
+    $('m-' + id).textContent = ' 복사됨';
+  };
+</script>
+</body>
+</html>
