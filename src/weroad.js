@@ -4,7 +4,7 @@
   if (window.__WF_DCAL__) return;
   window.__WF_DCAL__ = true;
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
   const CHANNEL = window.__WEROAD_CHANNEL__ || 'local';   // stable(일반) | dev(개발자) | local(직접 설치)
   const DAY_VER = 2;                       // 일자 캐시 구조 버전 (업무현황 추가)
   const SERVICES = ['스낵24', '조식24', '커피24'];
@@ -17,7 +17,7 @@
     affOptions: ['핫픽스', '대산물류', '창호통운', '개별지입', '사업소득자', '위풀정직원', '용차'],
     recentDays: 3,
     autoRefreshMin: 10,
-    concurrency: 3,
+    concurrency: 5,
   };
   const AFF_NONE = '미지정';
 
@@ -85,6 +85,18 @@
     const m = (doc.body ? doc.body.textContent : '').match(/총\s*([\d,]+)\s*건/);
     return m ? +m[1].replace(/,/g, '') : null;
   };
+  // 원문 HTML에서 "총 N건" (태그가 끼어 있어도 인식)
+  const rawTotal = (h) => { const m = h.match(/총\s*(?:<[^>]*>\s*)*([\d,]+)\s*(?:<[^>]*>\s*)*건/); return m ? +m[1].replace(/,/g, '') : null; };
+  // 큰 페이지에서 결과 표 부분만 잘라 파싱 (메뉴·검색필터·상품표를 건너뛰어 파싱 시간 단축)
+  const sliceTable = (h, marker) => {
+    const i = typeof marker === 'string' ? h.indexOf(marker) : h.search(marker);
+    if (i < 0) return null;
+    const st = h.lastIndexOf('<table', i);
+    if (st < 0) return h;
+    let en = h.indexOf('pagination', i);
+    if (en < 0) en = h.length;
+    return '<!doctype html><html><body>' + h.slice(st, en) + '</body></html>';
+  };
   const norm = (s) => s.replace(/\s+/g, '');
   const findTable = (doc, ...words) => [...doc.querySelectorAll('table')].find((t) => t.rows[0] && words.every((w) => norm(t.rows[0].textContent).includes(norm(w))));
   const headerIndex = (t) => { const hd = [...t.rows[0].cells].map((c) => norm(c.textContent)); return { hd, ix: (n) => hd.indexOf(norm(n)), find: (p) => hd.findIndex((h) => h.startsWith(norm(p))) }; };
@@ -97,8 +109,13 @@
       const qs = new URLSearchParams({ size: 1000, page: p, searchYN: 'Y', startDate: date, endDate: date,
         address1: '', address2: '', status: '', stockSurveyYN: '', examineYN: '', coffeeMachineYN: '', searchKeyword: '' });
       SERVICES.forEach((s) => qs.append('serviceTypes', s));
-      const doc = parseHTML(await getHTML('/office/delivery-manager/v2/schedules?' + qs));
-      const t = findTable(doc, '배송코스', '거래명세');
+      const html = await getHTML('/office/delivery-manager/v2/schedules?' + qs);
+      const tot = rawTotal(html);
+      const part = sliceTable(html, /onclick\s*=\s*["']\s*goDetail\(/);
+      if (part === null && !tot) break;               // 결과 0건
+      const doc = parseHTML(part || html);
+      let t = findTable(doc, '배송코스', '거래명세');
+      if (!t) t = findTable(parseHTML(html), '배송코스', '거래명세');   // 잘라내기 실패 시 전체 파싱
       if (!t) throw new Error('배송일정 표 구조를 찾지 못했습니다');
       const { hd, ix } = headerIndex(t);
       const I = { date: ix('배송일'), course: ix('배송코스'), driver: ix('배송기사'), seq: ix('배송순번'),
@@ -111,8 +128,7 @@
           cl: cellText(r, I.client), sv: cellText(r, I.svc), o: oa ? oa.textContent.trim() : cellText(r, I.order), st: cellText(r, I.status) });
         n++;
       }
-      const tot = totalCount(doc);
-      if (n === 0 || tot == null || out.length >= tot) break;
+      if (n === 0 || (tot != null ? out.length >= tot : n < 1000)) break;
     }
     return out;
   }
@@ -123,8 +139,11 @@
     for (let p = 1; p <= 30; p++) {
       const qs = new URLSearchParams({ size: 1000, page: p, searchYN: 'Y', deliveryDateBegin: date, deliveryDateEnd: date });
       SERVICES.forEach((s) => qs.append('serviceTypes', s));
-      const doc = parseHTML(await getHTML('/office/order/order?' + qs));
-      const t = doc.querySelector('table.orderSearchTable');
+      const html = await getHTML('/office/order/order?' + qs);
+      const tot = rawTotal(html);
+      const part = sliceTable(html, 'orderSearchTable');
+      let t = part ? parseHTML(part).querySelector('table.orderSearchTable') : null;
+      if (!t) t = parseHTML(html).querySelector('table.orderSearchTable');
       if (!t) throw new Error('주문 표 구조를 찾지 못했습니다');
       const { ix, find } = headerIndex(t);
       const iId = ix('#'), iSum = find('합계');
@@ -134,8 +153,7 @@
         const a = r.cells[iSum] ? r.cells[iSum].textContent.match(/₩\s*(-?[\d,]+)/) : null;
         if (/^\d+$/.test(id) && a) { m[id] = +a[1].replace(/,/g, ''); n++; }
       }
-      const tot = totalCount(doc);
-      if (n === 0 || tot == null || p * 1000 >= tot) break;
+      if (n === 0 || (tot != null ? p * 1000 >= tot : n < 1000)) break;
     }
     return m;
   }
@@ -207,14 +225,26 @@
   }
   const drvInfo = () => { const m = {}; for (const d of DRV.list) if (!m[d.name] || d.inOffice === '재직') m[d.name] = d; return m; };
 
-  async function syncDay(date) {
-    const [rows, amts, tasks] = await Promise.all([fetchSchedules(date), fetchAmounts(date), fetchTasks(date).catch(() => [])]);
-    const missing = [...new Set(rows.filter((r) => r.o && !(r.o in amts)).map((r) => r.o))].slice(0, 40);
-    for (const id of missing) amts[id] = await fetchOrderAmount(id);
-    rows.forEach((r) => { r.a = r.o in amts ? amts[r.o] : null; });
-    const rec = { date, v: DAY_VER, fetchedAt: Date.now(), rows, tasks };
-    await DB.put(rec);
+  // 1단계: 배송일정 + 업무현황 (빠름) — 금액은 기존 값을 임시로 유지하고 2단계에서 채움
+  async function syncBase(date) {
+    const [rows, tasks] = await Promise.all([fetchSchedules(date), fetchTasks(date).catch(() => [])]);
+    const prev = {};
+    if (S.days[date]) for (const r of S.days[date].rows) if (r.o && r.a != null) prev[r.o] = r.a;
+    rows.forEach((r) => { r.a = r.o in prev ? prev[r.o] : undefined; });
+    const rec = { date, v: DAY_VER, fetchedAt: Date.now(), rows, tasks, partial: true };
+    S.days[date] = rec;
     return rec;
+  }
+  // 2단계: 주문 목록 금액 (느림)
+  async function syncAmounts(date) {
+    const amts = await fetchAmounts(date);
+    const rec = S.days[date];
+    if (!rec) return;
+    const missing = [...new Set(rec.rows.filter((r) => r.o && !(r.o in amts)).map((r) => r.o))].slice(0, 40);
+    for (const id of missing) amts[id] = await fetchOrderAmount(id);
+    rec.rows.forEach((r) => { r.a = r.o in amts ? amts[r.o] : null; });
+    rec.partial = false;
+    await DB.put(rec);
   }
 
   // ---------------------------------------------------------------- state
@@ -255,20 +285,29 @@
     render();
     if (!need.length) return;
     S.syncing = true; S.error = '';
-    let done = 0;
-    const queue = need.slice().sort().reverse();
+    // 1단계(방문·업무현황) 전체를 먼저, 이어서 2단계(금액) — 화면은 1단계만 끝나도 채워짐
+    const order = need.slice().sort().reverse();
+    const queue = [...order.map((d) => ({ k: 'base', d })), ...order.map((d) => ({ k: 'amt', d }))];
+    const baseP = {};
+    let b = 0, a = 0;
+    const prog = () => { S.progress = b < need.length ? `방문 수집 ${b}/${need.length}일` : `금액 수집 ${a}/${need.length}일`; };
     const worker = async () => {
       while (queue.length) {
-        const d = queue.shift();
-        try { S.days[d] = await syncDay(d); }
-        catch (e) { S.error = `${d}: ${e.message}`; if (/로그인/.test(e.message)) queue.length = 0; }
-        done++;
-        S.progress = `수집 중 ${done}/${need.length}일`;
-        if (S.month === month) render();
+        const j = queue.shift();
+        try {
+          if (j.k === 'base') { baseP[j.d] = syncBase(j.d); await baseP[j.d]; b++; }
+          else { await baseP[j.d]; await syncAmounts(j.d); a++; }
+        } catch (e) {
+          if (j.k === 'base') b++; else a++;
+          S.error = `${j.d}: ${e.message}`;
+          if (/로그인/.test(e.message)) queue.length = 0;
+        }
+        prog();
+        if (S.month === month) renderSoon();
       }
     };
-    S.progress = `수집 중 0/${need.length}일`; render();
-    await Promise.all(Array.from({ length: Math.min(CFG.concurrency, need.length) }, worker));
+    prog(); render();
+    await Promise.all(Array.from({ length: Math.min(Math.max(CFG.concurrency, 5), queue.length) }, worker));
     S.syncing = false; S.progress = ''; S.lastSync = new Date();
     render();
   }
@@ -313,7 +352,7 @@
       let s = m.get(r.dr);
       if (!s) { s = { dr: r.dr, cnt: 0, amt: 0, dates: new Set(), courses: new Set(), snack: 0, josik: 0, missing: 0 }; m.set(r.dr, s); }
       s.cnt++; s.amt += r.a || 0; s.dates.add(r.d); s.courses.add(r.co);
-      if (r.a == null) s.missing++;
+      if (r.a === null) s.missing++;
       if (r.sv === '조식24') s.josik++; else s.snack++;
     }
     const info = drvInfo();
@@ -378,6 +417,8 @@
     return `background:${bg};color:${fg}`;
   }
 
+  let renderTimer = null;
+  function renderSoon() { if (renderTimer) return; renderTimer = setTimeout(() => { renderTimer = null; render(); }, 500); }
   function render() {
     if (ov.hidden) return;
     const rows = monthRows();
@@ -400,7 +441,8 @@
     list.sort((a, b) => { const x = a[k], y = b[k]; if (typeof x === 'string') return x.localeCompare(y, 'ko') * dir; return ((x ?? -1) - (y ?? -1)) * dir; });
     if ((!S.driver || !list.some((x) => x.dr === S.driver)) && list.length) S.driver = list[0].dr;
     const [y, m] = S.month.split('-');
-    const missingAll = rows.filter((r) => r.a == null).length;
+    const missingAll = rows.filter((r) => r.a === null).length;
+    const pendingAll = rows.filter((r) => r.a === undefined).length;
 
     app.innerHTML = `
       <header>
@@ -421,7 +463,7 @@
       <div class="summary">
         <div><b>${+m}월 합계</b> (${loadedDays}일 집계) · 기사 <b>${total.drivers}</b>명 · 착지 <b>${num(total.cnt)}</b>
         (스낵 ${num(total.snack)} / 조식 ${num(total.josik)}) · 금액 <b class="amt">${won(total.amt)}</b>
-        ${missingAll ? `<span class="warn">· 금액 미확인 ${missingAll}건</span>` : ''}
+        ${pendingAll ? `<span class="muted2">· 금액 수집 중 ${num(pendingAll)}건</span>` : ''}${missingAll ? `<span class="warn">· 금액 미확인 ${missingAll}건</span>` : ''}
         <span class="excl">제외 코스: ${esc([...CFG.excludeExact, ...CFG.excludeContains.map((x) => x + '*')].join(', '))}</span></div>
         <div class="chips">
           <button class="chip ${S.aff === 'all' ? 'on' : ''}" data-aff="all">전체</button>
@@ -480,7 +522,7 @@
           <div class="dh"><span class="dn ${i === 0 ? 'sun' : i === 6 ? 'sat' : ''}">${+d.slice(8)}</span>${list.length ? `<span class="dc">${list.length}곳</span>` : !loaded && d <= t ? '<span class="dc muted">미수집</span>' : ''}</div>
           ${list.length ? `<div class="dsum">${won(sum)}</div>` : ''}
           ${tk && (tk.start != null || tk.work) ? `<div class="dtime" title="업무시작~완료 · 총 근무시간">${clock(tk.start)}~${clock(tk.end)} · ${hm(tk.work)}</div>` : ''}
-          ${list.length ? `<ul>${list.map((r) => `<li title="${esc(r.cl)} · ${esc(r.co)} · ${esc(r.st)}" class="${r.st !== '완료' ? 'pending' : ''}"><span class="cn">${esc(shortName(r.cl))}</span><span class="ca">${r.a == null ? '?' : num(r.a)}</span></li>`).join('')}</ul>` : ''}
+          ${list.length ? `<ul>${list.map((r) => `<li title="${esc(r.cl)} · ${esc(r.co)} · ${esc(r.st)}" class="${r.st !== '완료' ? 'pending' : ''}"><span class="cn">${esc(shortName(r.cl))}</span><span class="ca">${r.a === undefined ? '…' : r.a === null ? '?' : num(r.a)}</span></li>`).join('')}</ul>` : ''}
         </td>`;
       }).join('')}<td class="wk">${wsum ? won(wsum) : ''}</td></tr>`;
     }).join('');
@@ -521,7 +563,7 @@
             ${dayTask.list.map((x) => `<tr><td>${esc(x.co)}</td><td>${esc(x.jobs)}</td><td>${esc(x.photo)}</td><td class="r">${x.rate == null ? '-' : x.rate.toFixed(1) + '%'}</td><td class="r">${won(x.ord)}</td><td>${esc(x.start || '-')}</td><td>${esc(x.end || '-')}</td><td class="r">${hm(x.work)}</td><td class="r">${hm(x.move)}</td><td class="r">${hm(x.task)}</td></tr>`).join('')}
           </tbody></table>` : S.date ? '<p class="hint">기사 업무현황 기록 없음</p>' : ''}
           ${S.date ? `<table class="grid"><thead><tr><th>순번</th><th>코스</th><th>거래처</th><th>서비스</th><th>상태</th><th class="r">금액</th><th>거래명세</th></tr></thead><tbody>
-            ${dayList.map((r) => `<tr><td class="c">${r.sq}</td><td>${esc(r.co)}</td><td title="${esc(r.cl)}">${esc(shortName(r.cl))}</td><td>${esc(r.sv)}</td><td class="${r.st !== '완료' ? 'pending' : ''}">${esc(r.st)}</td><td class="r">${won(r.a)}</td><td>${r.o ? `<a href="/office/order/order/${encodeURIComponent(r.o)}" target="_blank">${esc(r.o)}</a>` : ''}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">방문 없음</td></tr>'}
+            ${dayList.map((r) => `<tr><td class="c">${r.sq}</td><td>${esc(r.co)}</td><td title="${esc(r.cl)}">${esc(shortName(r.cl))}</td><td>${esc(r.sv)}</td><td class="${r.st !== '완료' ? 'pending' : ''}">${esc(r.st)}</td><td class="r">${r.a === undefined ? '수집 중' : won(r.a)}</td><td>${r.o ? `<a href="/office/order/order/${encodeURIComponent(r.o)}" target="_blank">${esc(r.o)}</a>` : ''}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">방문 없음</td></tr>'}
           </tbody></table>` : ''}
         </section>
         <section>
