@@ -4,16 +4,17 @@
   if (window.__WF_DCAL__) return;
   window.__WF_DCAL__ = true;
 
-  const VERSION = '1.4.0';
+  const VERSION = '1.4.2';
   const CHANNEL = window.__WEROAD_CHANNEL__ || 'local';   // stable(일반) | dev(개발자) | local(직접 설치)
   const DAY_VER = 2;                       // 일자 캐시 구조 버전 (업무현황 추가)
-  const SERVICES = ['스낵24', '조식24', '커피24'];
+  const SERVICES = ['스낵24', '조식24'];       // 커피24는 별도 서비스라 제외
+  const DEPT = '물류';                      // 배송기사 관리의 부서가 '물류'인 기사만 집계
   const CFG_KEY = 'wf-dcal-cfg';
   const AFF_KEY = 'wf-dcal-aff';           // 기사명 -> 소속
   const DRV_KEY = 'wf-dcal-drivers';       // 위펀오피스 배송기사 관리 캐시
   const DEFAULT_CFG = {
-    excludeExact: ['주간15', '주간19', '주간20', '주간21', '주간22'],
-    excludeContains: ['야간스낵본사', '위펀용차', '부산간선'],
+    excludeExact: [],
+    excludeContains: ['부산간선'],
     affOptions: ['핫픽스', '대산물류', '창호통운', '개별지입', '사업소득자', '위풀정직원', '용차'],
     recentDays: 3,
     autoRefreshMin: 10,
@@ -49,6 +50,20 @@
   const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
   let CFG = Object.assign({}, DEFAULT_CFG, lsGet(CFG_KEY, {}));
+  // 설정 이전(v1.4.1): 야간스낵본사 코스를 다시 포함
+  if ((CFG.cfgVer || 1) < 2) {
+    CFG.excludeContains = (CFG.excludeContains || []).filter((x) => x !== '야간스낵본사');
+    CFG.cfgVer = 2;
+    lsSet(CFG_KEY, CFG);
+  }
+  // 설정 이전(v1.4.2): 주간15·19·20·21·22, 위펀용차 다시 포함 — 부산간선만 제외
+  if (CFG.cfgVer < 3) {
+    const back = ['주간15', '주간19', '주간20', '주간21', '주간22'];
+    CFG.excludeExact = (CFG.excludeExact || []).filter((x) => !back.includes(x));
+    CFG.excludeContains = (CFG.excludeContains || []).filter((x) => x !== '위펀용차');
+    CFG.cfgVer = 3;
+    lsSet(CFG_KEY, CFG);
+  }
   let AFF = lsGet(AFF_KEY, {});
   let DRV = lsGet(DRV_KEY, { at: 0, list: [] });
   const affOf = (name) => AFF[name] || AFF_NONE;
@@ -314,21 +329,28 @@
   }
 
   // ---------------------------------------------------------------- aggregation
+  // 기사명 -> 부서 (배송기사 관리 기준). 목록에 없는 이름은 제외하지 않음
+  function deptMap() {
+    const m = {};
+    for (const d of DRV.list) if (d.name && (!(d.name in m) || d.inOffice === '재직')) m[d.name] = d.dept;
+    return m;
+  }
+  const otherDept = (dm, name) => name in dm && dm[name] && dm[name] !== DEPT;
   function monthRows() {
-    const out = [];
+    const out = [], dm = deptMap();
     for (const d of monthDates(S.month)) {
       const rec = S.days[d];
       if (!rec) continue;
-      for (const r of rec.rows) if (!isExcluded(r.co)) out.push(r);
+      for (const r of rec.rows) if (!isExcluded(r.co) && r.sv !== '커피24' && !otherDept(dm, r.dr)) out.push(r);
     }
     return out;
   }
   function monthTasks() {
-    const out = [];
+    const out = [], dm = deptMap();
     for (const d of monthDates(S.month)) {
       const rec = S.days[d];
       if (!rec || !rec.tasks) continue;
-      for (const t of rec.tasks) if (!isExcluded(t.co)) out.push(t);
+      for (const t of rec.tasks) if (!isExcluded(t.co) && !otherDept(dm, t.dr)) out.push(t);
     }
     return out;
   }
@@ -760,7 +782,7 @@
     return [...byName.values()].map((d) => Object.assign(d, { aff: affOf(d.name), mCnt: sm.get(d.name) ? sm.get(d.name).cnt : 0, mCourses: sm.get(d.name) ? sm.get(d.name).courseText : '' }));
   }
   function masterView(stats) {
-    let rows = masterRows(stats);
+    let rows = masterRows(stats).filter((r) => !r.dept || r.dept === DEPT);
     const nNone = rows.filter((r) => r.aff === AFF_NONE && (r.inOffice === '재직' || r.mCnt)).length;
     rows = rows.filter((r) => (!S.mOnlyActive || r.inOffice === '재직' || r.mCnt)
       && (!S.mOnlyNone || r.aff === AFF_NONE)
@@ -865,7 +887,7 @@
     download(`위로드_기사일별_${S.month}.csv`, [head, ...rows.map((r) => [r.d, r.co, r.dr, affOf(r.dr), info[r.dr] ? info[r.dr].vehicle : '', r.sq, r.sv, r.st, r.cl, shortName(r.cl), r.a ?? '', r.o])].map(csvLine).join('\r\n'));
   }
   function exportAff() {
-    const rows = masterRows(driverStats(monthRows(), {}));
+    const rows = masterRows(driverStats(monthRows(), {})).filter((r) => !r.dept || r.dept === DEPT);
     download('위로드_기사마스터_소속.csv', [['기사명', '소속', '부서', '차량정보', '기본코스', '재직', '입사일'], ...rows.map((r) => [r.name, r.aff === AFF_NONE ? '' : r.aff, r.dept, r.vehicle, r.course, r.inOffice, r.start])].map(csvLine).join('\r\n'));
   }
 
