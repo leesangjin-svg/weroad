@@ -4,7 +4,7 @@
   if (window.__WF_DCAL__) return;
   window.__WF_DCAL__ = true;
 
-  const VERSION = '1.4.2';
+  const VERSION = '1.4.3';
   const CHANNEL = window.__WEROAD_CHANNEL__ || 'local';   // stable(일반) | dev(개발자) | local(직접 설치)
   const DAY_VER = 2;                       // 일자 캐시 구조 버전 (업무현황 추가)
   const SERVICES = ['스낵24', '조식24'];       // 커피24는 별도 서비스라 제외
